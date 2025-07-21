@@ -131,29 +131,51 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
         # Parser avec encodage ISO-8859-1
         root = ET.fromstring(xml_content.decode(XML_ENCODING))
         
-        # Détecter le namespace automatiquement
-        namespace = root.tag.split('}')[0].strip('{') if '}' in root.tag else ''
+        # Méthode simple : chercher récursivement tous les éléments nommés 'Assignment'
+        assignments = []
         
-        # Chercher les Assignment de manière agnostique au namespace
-        assignments = root.findall(".//*[local-name()='Assignment']")
+        def find_assignments(element):
+            """Recherche récursive des éléments Assignment"""
+            # Enlever le namespace du tag pour comparer juste le nom local
+            tag_name = element.tag.split('}')[-1] if '}' in element.tag else element.tag
+            
+            if tag_name == 'Assignment':
+                assignments.append(element)
+            
+            # Continuer la recherche dans les enfants
+            for child in element:
+                find_assignments(child)
+        
+        # Lancer la recherche depuis la racine
+        find_assignments(root)
         
         if not assignments:
             st.error("Aucun contrat (Assignment) trouvé dans le fichier XML")
-            st.info(f"Namespace détecté: {namespace or 'aucun'}")
+            # Afficher la structure pour debug
+            st.info("Structure du fichier XML :")
+            st.code(ET.tostring(root, encoding='unicode')[:500] + "...")
             return []
         
-        st.info(f"✅ {len(assignments)} contrat(s) trouvé(s) - Namespace: {namespace or 'aucun'}")
+        st.success(f"✅ {len(assignments)} contrat(s) trouvé(s)")
         
-        for assignment_elem in assignments:
+        for idx, assignment_elem in enumerate(assignments):
             contract = ContractData()
             contract.filename = filename
             contract.original_tree = ET.ElementTree(root)
             
+            # Fonction helper pour trouver un élément par son nom local
+            def find_by_local_name(parent, local_name):
+                for elem in parent.iter():
+                    tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                    if tag_name == local_name:
+                        return elem
+                return None
+            
             # AssignmentId - chercher IdValue dans la structure HR-XML 2.x
-            assignment_id_elem = assignment_elem.find(".//*[local-name()='AssignmentId']")
+            assignment_id_elem = find_by_local_name(assignment_elem, 'AssignmentId')
             if assignment_id_elem is not None:
                 # Pour HR-XML 2.x, l'ID est dans IdValue
-                id_value_elem = assignment_id_elem.find(".//*[local-name()='IdValue']")
+                id_value_elem = find_by_local_name(assignment_id_elem, 'IdValue')
                 if id_value_elem is not None and id_value_elem.text:
                     contract.assignment_id = id_value_elem.text.strip()
                 # Si pas de IdValue, essayer le texte direct (HR-XML 3.x)
@@ -161,15 +183,15 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
                     contract.assignment_id = assignment_id_elem.text.strip()
             
             # StaffingSupplierId - peut être absent dans HR-XML 2.x
-            supplier_elem = assignment_elem.find(".//*[local-name()='StaffingSupplierId']")
+            supplier_elem = find_by_local_name(assignment_elem, 'StaffingSupplierId')
             if supplier_elem is not None and supplier_elem.text:
                 contract.staffing_supplier_id = supplier_elem.text.strip()
             
             # Extraire les dates - chercher AssignmentDateRange
-            date_range_elem = assignment_elem.find(".//*[local-name()='AssignmentDateRange']")
+            date_range_elem = find_by_local_name(assignment_elem, 'AssignmentDateRange')
             if date_range_elem is not None:
                 # StartDate
-                start_elem = date_range_elem.find(".//*[local-name()='StartDate']")
+                start_elem = find_by_local_name(date_range_elem, 'StartDate')
                 if start_elem is not None and start_elem.text:
                     try:
                         contract.start_date = parse_date(start_elem.text.strip())
@@ -177,7 +199,7 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
                         st.warning(f"Date de début invalide: {start_elem.text}")
                 
                 # ExpectedEndDate
-                expected_end_elem = date_range_elem.find(".//*[local-name()='ExpectedEndDate']")
+                expected_end_elem = find_by_local_name(date_range_elem, 'ExpectedEndDate')
                 if expected_end_elem is not None and expected_end_elem.text:
                     try:
                         contract.expected_end_date = parse_date(expected_end_elem.text.strip())
@@ -185,7 +207,7 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
                         st.warning(f"Date de fin prévue invalide: {expected_end_elem.text}")
                 
                 # ActualEndDate (optionnel)
-                actual_end_elem = date_range_elem.find(".//*[local-name()='ActualEndDate']")
+                actual_end_elem = find_by_local_name(date_range_elem, 'ActualEndDate')
                 if actual_end_elem is not None and actual_end_elem.text:
                     try:
                         contract.actual_end_date = parse_date(actual_end_elem.text.strip())
@@ -193,24 +215,36 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
                         st.warning(f"Date de fin réelle invalide: {actual_end_elem.text}")
                 
                 # Dates de flexibilité existantes (pour info)
-                flex_min_elem = date_range_elem.find(".//*[local-name()='FlexibilityMinDate']")
+                flex_min_elem = find_by_local_name(date_range_elem, 'FlexibilityMinDate')
                 if flex_min_elem is not None and flex_min_elem.text:
                     st.info(f"FlexibilityMinDate existante: {flex_min_elem.text.strip()}")
                 
-                flex_max_elem = date_range_elem.find(".//*[local-name()='FlexibilityMaxDate']")
+                flex_max_elem = find_by_local_name(date_range_elem, 'FlexibilityMaxDate')
                 if flex_max_elem is not None and flex_max_elem.text:
                     st.info(f"FlexibilityMaxDate existante: {flex_max_elem.text.strip()}")
             
             # TOUJOURS recalculer les dates de flexibilité selon les règles Pilott
             if contract.start_date and contract.expected_end_date:
-                flex_min, flex_max, _ = calc_flex_range(
+                flex_min, flex_max, flex_days = calc_flex_range(
                     contract.start_date, 
                     contract.expected_end_date
                 )
                 contract.flex_min_date = flex_min
                 contract.flex_max_date = flex_max
                 contracts.append(contract)
-                st.success(f"✅ Contrat {contract.assignment_id or f'#{len(contracts)}'}: Dates recalculées")
+                
+                # Afficher la comparaison
+                st.success(f"✅ Contrat {contract.assignment_id or f'#{idx+1}'}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write("**Nouvelles dates calculées:**")
+                    st.write(f"- FlexMin: {format_date(flex_min)}")
+                    st.write(f"- FlexMax: {format_date(flex_max)}")
+                with col2:
+                    st.write(f"**Règle appliquée:**")
+                    duration = (contract.expected_end_date - contract.start_date).days + 1
+                    st.write(f"- Durée: {duration} jours")
+                    st.write(f"- Flexibilité: {flex_days} jours")
             else:
                 st.warning(f"⚠️ Contrat {contract.assignment_id or 'sans ID'}: Dates de début/fin manquantes")
         
@@ -218,6 +252,7 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
         
     except ET.ParseError as e:
         st.error(f"Erreur de parsing XML: {str(e)}")
+        st.error("Vérifiez que le fichier est bien en XML valide")
         return []
     except Exception as e:
         st.error(f"Erreur lors du traitement: {str(e)}")
