@@ -24,11 +24,20 @@ st.set_page_config(
 # ============= CONSTANTS =============
 XML_ENCODING = 'ISO-8859-1'
 
-NAMESPACES = {
+# Support des deux versions HR-XML
+NAMESPACES_V3 = {
     'hr': 'http://www.hr-xml.org/3',
     'oa': 'http://www.openapplications.org/oagis/9',
     'xsi': 'http://www.w3.org/2001/XMLSchema-instance'
 }
+
+NAMESPACES_V2 = {
+    'hr': 'http://ns.hr-xml.org/2004-08-02',
+    'xsi': 'http://www.w3.org/2001/XMLSchema-instance'
+}
+
+# Namespace par défaut (sera détecté dynamiquement)
+NAMESPACES = NAMESPACES_V2
 
 DATE_FORMAT = '%Y-%m-%d'
 DATETIME_FORMAT = '%Y-%m-%dT%H:%M:%SZ'
@@ -119,47 +128,78 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
     """Parse un fichier XML et extrait TOUS les contrats (peut y en avoir plusieurs)."""
     contracts = []
     try:
+        # Parser avec encodage ISO-8859-1
         root = ET.fromstring(xml_content.decode(XML_ENCODING))
         
-        # Chercher tous les éléments Assignment dans le fichier
-        assignments = root.findall('.//hr:Assignment', NAMESPACES)
+        # Détecter le namespace automatiquement
+        namespace = root.tag.split('}')[0].strip('{') if '}' in root.tag else ''
+        
+        # Chercher les Assignment de manière agnostique au namespace
+        assignments = root.findall(".//*[local-name()='Assignment']")
         
         if not assignments:
             st.error("Aucun contrat (Assignment) trouvé dans le fichier XML")
+            st.info(f"Namespace détecté: {namespace or 'aucun'}")
             return []
+        
+        st.info(f"✅ {len(assignments)} contrat(s) trouvé(s) - Namespace: {namespace or 'aucun'}")
         
         for assignment_elem in assignments:
             contract = ContractData()
             contract.filename = filename
             contract.original_tree = ET.ElementTree(root)
             
-            # AssignmentId
-            assignment_id_elem = assignment_elem.find('.//hr:AssignmentId', NAMESPACES)
-            if assignment_id_elem is not None and assignment_id_elem.text:
-                contract.assignment_id = assignment_id_elem.text.strip()
+            # AssignmentId - chercher IdValue dans la structure HR-XML 2.x
+            assignment_id_elem = assignment_elem.find(".//*[local-name()='AssignmentId']")
+            if assignment_id_elem is not None:
+                # Pour HR-XML 2.x, l'ID est dans IdValue
+                id_value_elem = assignment_id_elem.find(".//*[local-name()='IdValue']")
+                if id_value_elem is not None and id_value_elem.text:
+                    contract.assignment_id = id_value_elem.text.strip()
+                # Si pas de IdValue, essayer le texte direct (HR-XML 3.x)
+                elif assignment_id_elem.text:
+                    contract.assignment_id = assignment_id_elem.text.strip()
             
-            # StaffingSupplierId
-            supplier_elem = assignment_elem.find('.//hr:StaffingSupplierId', NAMESPACES)
+            # StaffingSupplierId - peut être absent dans HR-XML 2.x
+            supplier_elem = assignment_elem.find(".//*[local-name()='StaffingSupplierId']")
             if supplier_elem is not None and supplier_elem.text:
                 contract.staffing_supplier_id = supplier_elem.text.strip()
             
-            # Extraire les dates pour CE contrat spécifique
-            date_range_elem = assignment_elem.find('.//hr:AssignmentDateRange', NAMESPACES)
+            # Extraire les dates - chercher AssignmentDateRange
+            date_range_elem = assignment_elem.find(".//*[local-name()='AssignmentDateRange']")
             if date_range_elem is not None:
                 # StartDate
-                start_elem = date_range_elem.find('hr:StartDate', NAMESPACES)
+                start_elem = date_range_elem.find(".//*[local-name()='StartDate']")
                 if start_elem is not None and start_elem.text:
-                    contract.start_date = parse_date(start_elem.text.strip())
+                    try:
+                        contract.start_date = parse_date(start_elem.text.strip())
+                    except:
+                        st.warning(f"Date de début invalide: {start_elem.text}")
                 
                 # ExpectedEndDate
-                expected_end_elem = date_range_elem.find('hr:ExpectedEndDate', NAMESPACES)
+                expected_end_elem = date_range_elem.find(".//*[local-name()='ExpectedEndDate']")
                 if expected_end_elem is not None and expected_end_elem.text:
-                    contract.expected_end_date = parse_date(expected_end_elem.text.strip())
+                    try:
+                        contract.expected_end_date = parse_date(expected_end_elem.text.strip())
+                    except:
+                        st.warning(f"Date de fin prévue invalide: {expected_end_elem.text}")
                 
                 # ActualEndDate (optionnel)
-                actual_end_elem = date_range_elem.find('hr:ActualEndDate', NAMESPACES)
+                actual_end_elem = date_range_elem.find(".//*[local-name()='ActualEndDate']")
                 if actual_end_elem is not None and actual_end_elem.text:
-                    contract.actual_end_date = parse_date(actual_end_elem.text.strip())
+                    try:
+                        contract.actual_end_date = parse_date(actual_end_elem.text.strip())
+                    except:
+                        st.warning(f"Date de fin réelle invalide: {actual_end_elem.text}")
+                
+                # Dates de flexibilité existantes (pour info)
+                flex_min_elem = date_range_elem.find(".//*[local-name()='FlexibilityMinDate']")
+                if flex_min_elem is not None and flex_min_elem.text:
+                    st.info(f"FlexibilityMinDate existante: {flex_min_elem.text.strip()}")
+                
+                flex_max_elem = date_range_elem.find(".//*[local-name()='FlexibilityMaxDate']")
+                if flex_max_elem is not None and flex_max_elem.text:
+                    st.info(f"FlexibilityMaxDate existante: {flex_max_elem.text.strip()}")
             
             # TOUJOURS recalculer les dates de flexibilité selon les règles Pilott
             if contract.start_date and contract.expected_end_date:
@@ -170,8 +210,9 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
                 contract.flex_min_date = flex_min
                 contract.flex_max_date = flex_max
                 contracts.append(contract)
+                st.success(f"✅ Contrat {contract.assignment_id or f'#{len(contracts)}'}: Dates recalculées")
             else:
-                st.warning(f"Contrat {contract.assignment_id or 'sans ID'}: Dates de début/fin manquantes")
+                st.warning(f"⚠️ Contrat {contract.assignment_id or 'sans ID'}: Dates de début/fin manquantes")
         
         return contracts
         
@@ -180,54 +221,57 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
         return []
     except Exception as e:
         st.error(f"Erreur lors du traitement: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return []
 
 def build_au_packet(contract: ContractData) -> ET.ElementTree:
-    """Construit un paquet AU (AssignmentUpdate) à partir des données du contrat."""
-    root = ET.Element('{' + NAMESPACES['hr'] + '}HRXMLRequest')
-    for prefix, uri in NAMESPACES.items():
-        root.set(f'xmlns:{prefix}', uri)
+    """Construit un paquet AU (AssignmentUpdate) compatible HR-XML 2004-08-02."""
+    # Créer la structure pour HR-XML 2.x
+    root = ET.Element('Envelope')
+    root.set('xmlns', 'http://ns.hr-xml.org/2004-08-02')
     
-    # Header
-    header = ET.SubElement(root, '{' + NAMESPACES['hr'] + '}Header')
-    transact_elem = ET.SubElement(header, '{' + NAMESPACES['hr'] + '}TransactId')
-    transact_elem.text = str(uuid.uuid4())
-    timestamp_elem = ET.SubElement(header, '{' + NAMESPACES['hr'] + '}TimeStamp')
-    timestamp_elem.text = format_datetime_utc(datetime.utcnow())
+    # Packet
+    packet = ET.SubElement(root, 'Packet')
     
-    # Body
-    body = ET.SubElement(root, '{' + NAMESPACES['hr'] + '}Body')
-    assignment = ET.SubElement(body, '{' + NAMESPACES['hr'] + '}Assignment')
-    assignment.set('processStatus', PROCESS_STATUS_UPDATE)
+    # AssignmentPacket
+    assignment_packet = ET.SubElement(packet, 'AssignmentPacket')
+    
+    # Assignment avec attributs
+    assignment = ET.SubElement(assignment_packet, 'Assignment')
     assignment.set('assignmentStatus', ASSIGNMENT_STATUS_ACTIVE)
     
-    # AssignmentId
-    assignment_id_elem = ET.SubElement(assignment, '{' + NAMESPACES['hr'] + '}AssignmentId')
-    assignment_id_elem.text = contract.assignment_id
+    # AssignmentId avec structure HR-XML 2.x
+    assignment_id_elem = ET.SubElement(assignment, 'AssignmentId')
+    assignment_id_elem.set('idOwner', 'RIS')  # Ou autre valeur appropriée
+    id_value = ET.SubElement(assignment_id_elem, 'IdValue')
+    id_value.text = contract.assignment_id
     
-    # StaffingSupplierId
-    supplier_elem = ET.SubElement(assignment, '{' + NAMESPACES['hr'] + '}StaffingSupplierId')
-    supplier_elem.text = contract.staffing_supplier_id
+    # Si StaffingSupplierId existe
+    if contract.staffing_supplier_id:
+        supplier_elem = ET.SubElement(assignment, 'StaffingSupplierId')
+        supplier_elem.text = contract.staffing_supplier_id
     
     # AssignmentDateRange
-    date_range = ET.SubElement(assignment, '{' + NAMESPACES['hr'] + '}AssignmentDateRange')
+    date_range = ET.SubElement(assignment, 'AssignmentDateRange')
     
     # Dates
-    start_elem = ET.SubElement(date_range, '{' + NAMESPACES['hr'] + '}StartDate')
+    start_elem = ET.SubElement(date_range, 'StartDate')
     start_elem.text = format_date(contract.start_date)
     
-    expected_end_elem = ET.SubElement(date_range, '{' + NAMESPACES['hr'] + '}ExpectedEndDate')
+    expected_end_elem = ET.SubElement(date_range, 'ExpectedEndDate')
     expected_end_elem.text = format_date(contract.expected_end_date)
     
     if contract.actual_end_date:
-        actual_end_elem = ET.SubElement(date_range, '{' + NAMESPACES['hr'] + '}ActualEndDate')
+        actual_end_elem = ET.SubElement(date_range, 'ActualEndDate')
         actual_end_elem.text = format_date(contract.actual_end_date)
     
-    flex_min_elem = ET.SubElement(date_range, '{' + NAMESPACES['hr'] + '}FlexibilityMinDate')
+    # Dates de flexibilité recalculées
+    flex_min_elem = ET.SubElement(date_range, 'FlexibilityMinDate')
     if contract.flex_min_date:
         flex_min_elem.text = format_date(contract.flex_min_date)
     
-    flex_max_elem = ET.SubElement(date_range, '{' + NAMESPACES['hr'] + '}FlexibilityMaxDate')
+    flex_max_elem = ET.SubElement(date_range, 'FlexibilityMaxDate')
     if contract.flex_max_date:
         flex_max_elem.text = format_date(contract.flex_max_date)
     
