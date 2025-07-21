@@ -108,60 +108,70 @@ class ContractData:
         self.original_tree = None
         self.filename = ""
 
-def parse_contract_xml(xml_content: bytes, filename: str = "") -> ContractData:
-    """Parse un fichier XML de contrat et extrait les données pertinentes."""
+def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractData]:
+    """Parse un fichier XML et extrait TOUS les contrats (peut y en avoir plusieurs)."""
+    contracts = []
     try:
         root = ET.fromstring(xml_content.decode(XML_ENCODING))
         
-        contract = ContractData()
-        contract.filename = filename
-        contract.original_tree = ET.ElementTree(root)
+        # Chercher tous les éléments Assignment dans le fichier
+        assignments = root.findall('.//hr:Assignment', NAMESPACES)
         
-        # Extraire les identifiants
-        assignment_elem = root.find('.//hr:Assignment', NAMESPACES)
-        if assignment_elem is not None:
+        for assignment_elem in assignments:
+            contract = ContractData()
+            contract.filename = filename
+            contract.original_tree = ET.ElementTree(root)
+            
+            # AssignmentId
             assignment_id_elem = assignment_elem.find('.//hr:AssignmentId', NAMESPACES)
             if assignment_id_elem is not None:
                 contract.assignment_id = assignment_id_elem.text or ""
             
+            # StaffingSupplierId
             supplier_elem = assignment_elem.find('.//hr:StaffingSupplierId', NAMESPACES)
             if supplier_elem is not None:
                 contract.staffing_supplier_id = supplier_elem.text or ""
-        
-        # Extraire les dates
-        date_range_elem = root.find('.//hr:AssignmentDateRange', NAMESPACES)
-        if date_range_elem is not None:
-            start_elem = date_range_elem.find('hr:StartDate', NAMESPACES)
-            if start_elem is not None and start_elem.text:
-                contract.start_date = parse_date(start_elem.text)
             
-            expected_end_elem = date_range_elem.find('hr:ExpectedEndDate', NAMESPACES)
-            if expected_end_elem is not None and expected_end_elem.text:
-                contract.expected_end_date = parse_date(expected_end_elem.text)
+            # Extraire les dates pour CE contrat spécifique
+            date_range_elem = assignment_elem.find('.//hr:AssignmentDateRange', NAMESPACES)
+            if date_range_elem is not None:
+                # StartDate
+                start_elem = date_range_elem.find('hr:StartDate', NAMESPACES)
+                if start_elem is not None and start_elem.text:
+                    contract.start_date = parse_date(start_elem.text)
+                
+                # ExpectedEndDate
+                expected_end_elem = date_range_elem.find('hr:ExpectedEndDate', NAMESPACES)
+                if expected_end_elem is not None and expected_end_elem.text:
+                    contract.expected_end_date = parse_date(expected_end_elem.text)
+                
+                # ActualEndDate (optionnel)
+                actual_end_elem = date_range_elem.find('hr:ActualEndDate', NAMESPACES)
+                if actual_end_elem is not None and actual_end_elem.text:
+                    contract.actual_end_date = parse_date(actual_end_elem.text)
+                
+                # FlexibilityMinDate
+                flex_min_elem = date_range_elem.find('hr:FlexibilityMinDate', NAMESPACES)
+                if flex_min_elem is not None and flex_min_elem.text:
+                    contract.flex_min_date = parse_date(flex_min_elem.text)
+                
+                # FlexibilityMaxDate
+                flex_max_elem = date_range_elem.find('hr:FlexibilityMaxDate', NAMESPACES)
+                if flex_max_elem is not None and flex_max_elem.text:
+                    contract.flex_max_date = parse_date(flex_max_elem.text)
             
-            actual_end_elem = date_range_elem.find('hr:ActualEndDate', NAMESPACES)
-            if actual_end_elem is not None and actual_end_elem.text:
-                contract.actual_end_date = parse_date(actual_end_elem.text)
-            
-            flex_min_elem = date_range_elem.find('hr:FlexibilityMinDate', NAMESPACES)
-            if flex_min_elem is not None and flex_min_elem.text:
-                contract.flex_min_date = parse_date(flex_min_elem.text)
-            
-            flex_max_elem = date_range_elem.find('hr:FlexibilityMaxDate', NAMESPACES)
-            if flex_max_elem is not None and flex_max_elem.text:
-                contract.flex_max_date = parse_date(flex_max_elem.text)
-        
-        # Calculer les dates de flexibilité si nécessaire
-        if contract.start_date and contract.expected_end_date:
-            if not contract.flex_min_date or not contract.flex_max_date:
+            # TOUJOURS recalculer les dates de flexibilité selon les règles Pilott
+            if contract.start_date and contract.expected_end_date:
                 flex_min, flex_max, _ = calc_flex_range(
                     contract.start_date, 
                     contract.expected_end_date
                 )
                 contract.flex_min_date = flex_min
                 contract.flex_max_date = flex_max
+            
+            contracts.append(contract)
         
-        return contract
+        return contracts if contracts else [ContractData()]  # Retourner au moins un contrat vide
         
     except Exception as e:
         raise ValueError(f"{ERROR_MESSAGES['parsing_error']}: {str(e)}")
@@ -308,7 +318,7 @@ def validate_filename(filename: str) -> bool:
     return bool(re.match(INPUT_FILE_PATTERN, filename))
 
 def process_uploaded_file(uploaded_file) -> Dict:
-    """Traite un fichier uploadé"""
+    """Traite un fichier uploadé (peut contenir plusieurs contrats)."""
     try:
         content = uploaded_file.read()
         
@@ -318,24 +328,28 @@ def process_uploaded_file(uploaded_file) -> Dict:
                 'error': ERROR_MESSAGES['invalid_file_format']
             }
         
-        contract = parse_contract_xml(content, uploaded_file.name)
+        contracts = parse_contract_xml(content, uploaded_file.name)
+        validated_contracts = []
         
-        if contract.start_date and contract.expected_end_date:
-            valid, error_msg = validate_date_coherence(
-                contract.start_date,
-                contract.expected_end_date,
-                contract.actual_end_date
-            )
-            
-            if not valid:
-                return {
-                    'success': False,
-                    'error': error_msg
-                }
+        for contract in contracts:
+            if contract.start_date and contract.expected_end_date:
+                valid, error_msg = validate_date_coherence(
+                    contract.start_date,
+                    contract.expected_end_date,
+                    contract.actual_end_date
+                )
+                
+                if not valid:
+                    add_message(f"⚠️ Contrat {contract.assignment_id}: {error_msg}", "warning")
+                else:
+                    validated_contracts.append(contract)
+            elif contract.assignment_id:  # Contrat avec ID mais sans dates
+                add_message(f"⚠️ Contrat {contract.assignment_id}: Dates manquantes", "warning")
         
         return {
             'success': True,
-            'contract': contract
+            'contracts': validated_contracts,
+            'total_found': len(contracts)
         }
         
     except Exception as e:
@@ -361,17 +375,23 @@ def main():
         )
         
         if uploaded_files:
-            if st.button("🔄 Charger les fichiers", type="primary"):
+            if st.button("🔄 Charger les fichiers", type="primary", use_container_width=True):
                 st.session_state.contracts = []
+                total_loaded = 0
                 
                 for file in uploaded_files:
                     result = process_uploaded_file(file)
                     
                     if result['success']:
-                        st.session_state.contracts.append(result['contract'])
-                        add_message(f"✅ {file.name} chargé avec succès", "success")
+                        st.session_state.contracts.extend(result['contracts'])
+                        total_loaded += len(result['contracts'])
+                        add_message(f"✅ {file.name}: {len(result['contracts'])} contrat(s) chargé(s)", "success")
                     else:
                         add_message(f"❌ {file.name}: {result['error']}", "error")
+                
+                if total_loaded > 0:
+                    st.success(f"Total: {total_loaded} contrat(s) chargé(s)")
+                    st.rerun()
         
         st.markdown("---")
         
@@ -387,8 +407,18 @@ def main():
         with tab1:
             st.header("Contrats chargés")
             
+            # Afficher un résumé
+            st.info(f"📊 **{len(st.session_state.contracts)} contrat(s)** à traiter")
+            
             for idx, contract in enumerate(st.session_state.contracts):
-                with st.expander(f"📄 {contract.filename} - ID: {contract.assignment_id}", expanded=True):
+                # Titre unique pour chaque contrat
+                contract_title = f"📄 Contrat #{idx+1}"
+                if contract.assignment_id:
+                    contract_title += f" - ID: {contract.assignment_id}"
+                if contract.filename:
+                    contract_title += f" (source: {contract.filename})"
+                
+                with st.expander(contract_title, expanded=(idx == 0)):  # Seul le premier est ouvert
                     col1, col2, col3 = st.columns(3)
                     
                     with col1:
