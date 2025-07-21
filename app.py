@@ -12,7 +12,14 @@ import xml.etree.ElementTree as ET
 import uuid
 import pytz
 from dateutil import parser
-import xmlschema
+import io
+
+# Configuration de la page
+st.set_page_config(
+    page_title="Pilott Date Editor",
+    page_icon="📅",
+    layout="wide"
+)
 
 # ============= CONSTANTS =============
 XML_ENCODING = 'ISO-8859-1'
@@ -117,6 +124,10 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
         # Chercher tous les éléments Assignment dans le fichier
         assignments = root.findall('.//hr:Assignment', NAMESPACES)
         
+        if not assignments:
+            st.error("Aucun contrat (Assignment) trouvé dans le fichier XML")
+            return []
+        
         for assignment_elem in assignments:
             contract = ContractData()
             contract.filename = filename
@@ -124,13 +135,13 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
             
             # AssignmentId
             assignment_id_elem = assignment_elem.find('.//hr:AssignmentId', NAMESPACES)
-            if assignment_id_elem is not None:
-                contract.assignment_id = assignment_id_elem.text or ""
+            if assignment_id_elem is not None and assignment_id_elem.text:
+                contract.assignment_id = assignment_id_elem.text.strip()
             
             # StaffingSupplierId
             supplier_elem = assignment_elem.find('.//hr:StaffingSupplierId', NAMESPACES)
-            if supplier_elem is not None:
-                contract.staffing_supplier_id = supplier_elem.text or ""
+            if supplier_elem is not None and supplier_elem.text:
+                contract.staffing_supplier_id = supplier_elem.text.strip()
             
             # Extraire les dates pour CE contrat spécifique
             date_range_elem = assignment_elem.find('.//hr:AssignmentDateRange', NAMESPACES)
@@ -138,27 +149,17 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
                 # StartDate
                 start_elem = date_range_elem.find('hr:StartDate', NAMESPACES)
                 if start_elem is not None and start_elem.text:
-                    contract.start_date = parse_date(start_elem.text)
+                    contract.start_date = parse_date(start_elem.text.strip())
                 
                 # ExpectedEndDate
                 expected_end_elem = date_range_elem.find('hr:ExpectedEndDate', NAMESPACES)
                 if expected_end_elem is not None and expected_end_elem.text:
-                    contract.expected_end_date = parse_date(expected_end_elem.text)
+                    contract.expected_end_date = parse_date(expected_end_elem.text.strip())
                 
                 # ActualEndDate (optionnel)
                 actual_end_elem = date_range_elem.find('hr:ActualEndDate', NAMESPACES)
                 if actual_end_elem is not None and actual_end_elem.text:
-                    contract.actual_end_date = parse_date(actual_end_elem.text)
-                
-                # FlexibilityMinDate
-                flex_min_elem = date_range_elem.find('hr:FlexibilityMinDate', NAMESPACES)
-                if flex_min_elem is not None and flex_min_elem.text:
-                    contract.flex_min_date = parse_date(flex_min_elem.text)
-                
-                # FlexibilityMaxDate
-                flex_max_elem = date_range_elem.find('hr:FlexibilityMaxDate', NAMESPACES)
-                if flex_max_elem is not None and flex_max_elem.text:
-                    contract.flex_max_date = parse_date(flex_max_elem.text)
+                    contract.actual_end_date = parse_date(actual_end_elem.text.strip())
             
             # TOUJOURS recalculer les dates de flexibilité selon les règles Pilott
             if contract.start_date and contract.expected_end_date:
@@ -168,13 +169,18 @@ def parse_contract_xml(xml_content: bytes, filename: str = "") -> List[ContractD
                 )
                 contract.flex_min_date = flex_min
                 contract.flex_max_date = flex_max
-            
-            contracts.append(contract)
+                contracts.append(contract)
+            else:
+                st.warning(f"Contrat {contract.assignment_id or 'sans ID'}: Dates de début/fin manquantes")
         
-        return contracts if contracts else [ContractData()]  # Retourner au moins un contrat vide
+        return contracts
         
+    except ET.ParseError as e:
+        st.error(f"Erreur de parsing XML: {str(e)}")
+        return []
     except Exception as e:
-        raise ValueError(f"{ERROR_MESSAGES['parsing_error']}: {str(e)}")
+        st.error(f"Erreur lors du traitement: {str(e)}")
+        return []
 
 def build_au_packet(contract: ContractData) -> ET.ElementTree:
     """Construit un paquet AU (AssignmentUpdate) à partir des données du contrat."""
@@ -227,44 +233,6 @@ def build_au_packet(contract: ContractData) -> ET.ElementTree:
     
     return ET.ElementTree(root)
 
-def build_staffing_action(contract: ContractData, 
-                         flexibility_date: Optional[str] = None,
-                         delete: bool = False) -> ET.ElementTree:
-    """Construit un StaffingAction pour la date de souplesse."""
-    root = ET.Element('{' + NAMESPACES['hr'] + '}HRXMLRequest')
-    for prefix, uri in NAMESPACES.items():
-        root.set(f'xmlns:{prefix}', uri)
-    
-    # Header
-    header = ET.SubElement(root, '{' + NAMESPACES['hr'] + '}Header')
-    transact_elem = ET.SubElement(header, '{' + NAMESPACES['hr'] + '}TransactId')
-    transact_elem.text = str(uuid.uuid4())
-    timestamp_elem = ET.SubElement(header, '{' + NAMESPACES['hr'] + '}TimeStamp')
-    timestamp_elem.text = format_datetime_utc(datetime.utcnow())
-    
-    # Body avec StaffingAction
-    body = ET.SubElement(root, '{' + NAMESPACES['hr'] + '}Body')
-    staffing_action = ET.SubElement(body, '{' + NAMESPACES['hr'] + '}StaffingAction')
-    
-    assignment_id_elem = ET.SubElement(staffing_action, '{' + NAMESPACES['hr'] + '}AssignmentId')
-    assignment_id_elem.text = contract.assignment_id
-    
-    reason_elem = ET.SubElement(staffing_action, '{' + NAMESPACES['hr'] + '}ActionReasonCode')
-    reason_elem.text = ACTION_REASON_CODE_FLEXIBILITY
-    
-    comments_elem = ET.SubElement(staffing_action, '{' + NAMESPACES['hr'] + '}ActionTypeComments')
-    comments_elem.text = 'delete' if delete else flexibility_date
-    
-    return ET.ElementTree(root)
-
-def write_xml(tree: ET.ElementTree, output_path: str) -> None:
-    """Écrit un ElementTree dans un fichier XML avec encodage ISO-8859-1."""
-    _indent(tree.getroot())
-    tree.write(output_path, 
-               encoding=XML_ENCODING,
-               xml_declaration=True,
-               method='xml')
-
 def _indent(elem: ET.Element, level: int = 0) -> None:
     """Helper pour indenter le XML"""
     i = "\n" + level * "  "
@@ -289,323 +257,167 @@ def generate_output_filename(file_type: str = 'AU') -> str:
     else:
         return OUTPUT_FILE_PATTERN.format(timestamp=timestamp)
 
+def tree_to_string(tree: ET.ElementTree, encoding: str = XML_ENCODING) -> bytes:
+    """Convertit un ElementTree en bytes avec l'encodage spécifié."""
+    _indent(tree.getroot())
+    
+    # Créer un buffer pour écrire le XML
+    buffer = io.BytesIO()
+    tree.write(buffer, encoding=encoding, xml_declaration=True, method='xml')
+    return buffer.getvalue()
+
 # ============= STREAMLIT APP =============
 
-# Configuration de la page
-st.set_page_config(
-    page_title="Pilott Date Editor",
-    page_icon="📅",
-    layout="wide"
-)
+# Titre principal
+st.title("🔧 Pilott Date Editor")
+st.markdown("**Calculateur automatique de dates pour contrats HR-XML selon les règles Pilott**")
 
 # État de session
 if 'contracts' not in st.session_state:
     st.session_state.contracts = []
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
 
-def add_message(message: str, msg_type: str = "info"):
-    """Ajoute un message au log"""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    st.session_state.messages.append({
-        'time': timestamp,
-        'type': msg_type,
-        'message': message
-    })
+# Zone de chargement de fichier
+st.header("📁 1. Charger votre fichier XML")
+uploaded_file = st.file_uploader(
+    "Sélectionnez un fichier XML de contrat",
+    type=['xml'],
+    help="Format attendu: ASS_*_A_ETT.xml"
+)
 
-def validate_filename(filename: str) -> bool:
-    """Valide le format du nom de fichier"""
-    return bool(re.match(INPUT_FILE_PATTERN, filename))
-
-def process_uploaded_file(uploaded_file) -> Dict:
-    """Traite un fichier uploadé (peut contenir plusieurs contrats)."""
-    try:
-        content = uploaded_file.read()
-        
-        if not validate_filename(uploaded_file.name):
-            return {
-                'success': False,
-                'error': ERROR_MESSAGES['invalid_file_format']
-            }
-        
-        contracts = parse_contract_xml(content, uploaded_file.name)
-        validated_contracts = []
-        
-        for contract in contracts:
-            if contract.start_date and contract.expected_end_date:
-                valid, error_msg = validate_date_coherence(
-                    contract.start_date,
-                    contract.expected_end_date,
-                    contract.actual_end_date
-                )
-                
-                if not valid:
-                    add_message(f"⚠️ Contrat {contract.assignment_id}: {error_msg}", "warning")
-                else:
-                    validated_contracts.append(contract)
-            elif contract.assignment_id:  # Contrat avec ID mais sans dates
-                add_message(f"⚠️ Contrat {contract.assignment_id}: Dates manquantes", "warning")
-        
-        return {
-            'success': True,
-            'contracts': validated_contracts,
-            'total_found': len(contracts)
-        }
-        
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
-
-def main():
-    # Header
-    st.title("🔧 Pilott Date Editor")
-    st.markdown("**Éditeur de dates pour contrats HR-XML conformes aux règles Pilott**")
-    
-    # Sidebar pour les actions
-    with st.sidebar:
-        st.header("📁 Chargement des fichiers")
-        
-        uploaded_files = st.file_uploader(
-            "Glissez vos fichiers XML ici",
-            type=['xml'],
-            accept_multiple_files=True,
-            help="Format attendu: ASS_*_A_ETT.xml"
-        )
-        
-        if uploaded_files:
-            if st.button("🔄 Charger les fichiers", type="primary", use_container_width=True):
-                st.session_state.contracts = []
-                total_loaded = 0
-                
-                for file in uploaded_files:
-                    result = process_uploaded_file(file)
-                    
-                    if result['success']:
-                        st.session_state.contracts.extend(result['contracts'])
-                        total_loaded += len(result['contracts'])
-                        add_message(f"✅ {file.name}: {len(result['contracts'])} contrat(s) chargé(s)", "success")
-                    else:
-                        add_message(f"❌ {file.name}: {result['error']}", "error")
-                
-                if total_loaded > 0:
-                    st.success(f"Total: {total_loaded} contrat(s) chargé(s)")
-                    st.rerun()
-        
-        st.markdown("---")
-        
-        if st.button("🗑️ Réinitialiser"):
-            st.session_state.contracts = []
-            st.session_state.messages = []
-            st.rerun()
-    
-    # Zone principale
-    if st.session_state.contracts:
-        tab1, tab2, tab3 = st.tabs(["📊 Édition des dates", "📄 Génération AU", "📋 Log"])
-        
-        with tab1:
-            st.header("Contrats chargés")
-            
-            # Afficher un résumé
-            st.info(f"📊 **{len(st.session_state.contracts)} contrat(s)** à traiter")
-            
-            for idx, contract in enumerate(st.session_state.contracts):
-                # Titre unique pour chaque contrat
-                contract_title = f"📄 Contrat #{idx+1}"
-                if contract.assignment_id:
-                    contract_title += f" - ID: {contract.assignment_id}"
-                if contract.filename:
-                    contract_title += f" (source: {contract.filename})"
-                
-                with st.expander(contract_title, expanded=(idx == 0)):  # Seul le premier est ouvert
-                    col1, col2, col3 = st.columns(3)
-                    
-                    with col1:
-                        st.subheader("Dates principales")
-                        
-                        new_start = st.date_input(
-                            "Date de début",
-                            value=contract.start_date,
-                            key=f"start_{idx}",
-                            format="YYYY-MM-DD"
-                        )
-                        
-                        new_expected_end = st.date_input(
-                            "Date de fin prévue",
-                            value=contract.expected_end_date,
-                            key=f"expected_{idx}",
-                            format="YYYY-MM-DD"
-                        )
-                        
-                        has_actual_end = st.checkbox(
-                            "Date de fin réelle définie",
-                            value=contract.actual_end_date is not None,
-                            key=f"has_actual_{idx}"
-                        )
-                        
-                        if has_actual_end:
-                            new_actual_end = st.date_input(
-                                "Date de fin réelle",
-                                value=contract.actual_end_date or new_expected_end,
-                                key=f"actual_{idx}",
-                                format="YYYY-MM-DD"
-                            )
-                        else:
-                            new_actual_end = None
-                    
-                    with col2:
-                        st.subheader("Dates de flexibilité")
-                        
-                        if new_start != contract.start_date or new_expected_end != contract.expected_end_date:
-                            flex_min, flex_max, flex_days = calc_flex_range(new_start, new_expected_end)
-                            
-                            contract.start_date = new_start
-                            contract.expected_end_date = new_expected_end
-                            contract.flex_min_date = flex_min
-                            contract.flex_max_date = flex_max
-                        
-                        # Assurer que les dates de flexibilité existent
-                        if contract.flex_min_date and contract.flex_max_date:
-                            st.info(f"**Flexibilité Min:** {format_date(contract.flex_min_date)}")
-                            st.info(f"**Flexibilité Max:** {format_date(contract.flex_max_date)}")
-                        else:
-                            st.warning("Dates de flexibilité non calculées")
-                        
-                        duration = (contract.expected_end_date - contract.start_date).days + 1
-                        flex_days = min(10, max(1, duration // 5))
-                        st.metric("Jours de flexibilité", flex_days)
-                    
-                    with col3:
-                        st.subheader("Validations")
-                        
-                        valid, error_msg = validate_date_coherence(
-                            contract.start_date,
-                            contract.expected_end_date,
-                            new_actual_end
-                        )
-                        
-                        if valid:
-                            st.success("✅ Dates cohérentes")
-                        else:
-                            st.error(f"❌ {error_msg}")
-                        
-                        contract.actual_end_date = new_actual_end
-                        
-                        st.metric(
-                            "Durée totale (jours)",
-                            (contract.expected_end_date - contract.start_date).days + 1
-                        )
-        
-        with tab2:
-            st.header("Génération des fichiers AU")
-            
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                contracts_to_generate = st.multiselect(
-                    "Sélectionnez les contrats à générer",
-                    options=[f"{c.filename} - {c.assignment_id}" for c in st.session_state.contracts],
-                    default=[f"{c.filename} - {c.assignment_id}" for c in st.session_state.contracts]
-                )
-            
-            with col2:
-                generate_type = st.radio(
-                    "Type de génération",
-                    ["AU (Mise à jour)", "SA (Date souplesse)"]
-                )
-            
-            if generate_type == "SA (Date souplesse)":
-                col3, col4 = st.columns(2)
-                with col3:
-                    flex_date = st.date_input(
-                        "Date d'utilisation de la souplesse",
-                        value=date.today(),
-                        format="YYYY-MM-DD"
-                    )
-                with col4:
-                    is_delete = st.checkbox("Supprimer la souplesse")
-            
-            if st.button("🚀 Générer les fichiers", type="primary"):
-                generated_files = []
-                
-                for idx, contract_str in enumerate(contracts_to_generate):
-                    contract = st.session_state.contracts[idx]
-                    
-                    try:
-                        if generate_type.startswith("AU"):
-                            filename = generate_output_filename('AU')
-                            au_tree = build_au_packet(contract)
-                            
-                            with tempfile.NamedTemporaryFile(mode='wb', suffix='.xml', delete=False) as tmp:
-                                write_xml(au_tree, tmp.name)
-                                generated_files.append((filename, tmp.name))
-                        
-                        else:  # StaffingAction
-                            filename = generate_output_filename('SA')
-                            sa_tree = build_staffing_action(
-                                contract,
-                                format_date(flex_date) if not is_delete else None,
-                                is_delete
-                            )
-                            
-                            with tempfile.NamedTemporaryFile(mode='wb', suffix='.xml', delete=False) as tmp:
-                                write_xml(sa_tree, tmp.name)
-                                generated_files.append((filename, tmp.name))
-                        
-                        add_message(f"✅ {filename} généré", "success")
-                        
-                    except Exception as e:
-                        add_message(f"❌ Erreur génération: {str(e)}", "error")
-                
-                if generated_files:
-                    st.success(f"✅ {len(generated_files)} fichier(s) généré(s)")
-                    
-                    for filename, filepath in generated_files:
-                        with open(filepath, 'rb') as f:
-                            content = f.read()
-                        
-                        st.download_button(
-                            label=f"📥 Télécharger {filename}",
-                            data=content,
-                            file_name=filename,
-                            mime="application/xml"
-                        )
-                        
-                        Path(filepath).unlink()
-        
-        with tab3:
-            st.header("Journal des opérations")
-            
-            if st.session_state.messages:
-                for msg in reversed(st.session_state.messages):
-                    if msg['type'] == 'error':
-                        st.error(f"**{msg['time']}** - {msg['message']}")
-                    elif msg['type'] == 'success':
-                        st.success(f"**{msg['time']}** - {msg['message']}")
-                    else:
-                        st.info(f"**{msg['time']}** - {msg['message']}")
-            else:
-                st.info("Aucune opération enregistrée")
-    
+if uploaded_file is not None:
+    # Validation du nom de fichier
+    if not re.match(INPUT_FILE_PATTERN, uploaded_file.name):
+        st.error(f"❌ {ERROR_MESSAGES['invalid_file_format']}")
     else:
-        st.info("👈 Utilisez la barre latérale pour charger vos fichiers XML")
-        
-        with st.expander("📖 Guide rapide"):
-            st.markdown("""
-            ### Comment utiliser l'application
-            
-            1. **Chargez vos fichiers** dans la barre latérale (format: ASS_*_A_ETT.xml)
-            2. **Éditez les dates** dans l'onglet "Édition des dates"
-            3. **Générez les fichiers AU** dans l'onglet "Génération AU"
-            4. **Téléchargez** les fichiers générés
-            
-            ### Règles de calcul
-            
-            - **Flexibilité** = ⌊(durée calendaire / 5)⌋ jours, plafonné à 10
-            - **Date fin réelle** doit être ≤ FlexibilityMaxDate
-            - Les dates sont automatiquement recalculées
-            """)
+        # Bouton pour analyser le fichier
+        if st.button("📊 Analyser le fichier", type="primary"):
+            try:
+                content = uploaded_file.read()
+                contracts = parse_contract_xml(content, uploaded_file.name)
+                
+                if contracts:
+                    st.session_state.contracts = contracts
+                    st.success(f"✅ {len(contracts)} contrat(s) trouvé(s) et analysé(s)")
+                else:
+                    st.error("Aucun contrat valide trouvé dans le fichier")
+                    
+            except Exception as e:
+                st.error(f"Erreur lors du traitement: {str(e)}")
 
-if __name__ == "__main__":
-    main()
+# Affichage et édition des contrats
+if st.session_state.contracts:
+    st.header("📊 2. Vérifier et modifier les dates")
+    
+    for idx, contract in enumerate(st.session_state.contracts):
+        st.markdown(f"### Contrat {idx + 1} - ID: {contract.assignment_id}")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown("**Dates principales**")
+            
+            # Affichage des dates actuelles
+            st.write(f"Date début: **{format_date(contract.start_date)}**")
+            st.write(f"Date fin prévue: **{format_date(contract.expected_end_date)}**")
+            
+            if contract.actual_end_date:
+                st.write(f"Date fin réelle: **{format_date(contract.actual_end_date)}**")
+            
+            # Durée
+            if contract.start_date and contract.expected_end_date:
+                duration = (contract.expected_end_date - contract.start_date).days + 1
+                st.write(f"Durée: **{duration} jours**")
+        
+        with col2:
+            st.markdown("**Dates de flexibilité calculées**")
+            
+            if contract.flex_min_date and contract.flex_max_date:
+                st.success(f"Min: **{format_date(contract.flex_min_date)}**")
+                st.success(f"Max: **{format_date(contract.flex_max_date)}**")
+                
+                # Calcul du nombre de jours
+                flex_days = (contract.flex_max_date - contract.expected_end_date).days
+                st.info(f"Flexibilité: **{flex_days} jours**")
+                
+                # Afficher la formule
+                duration = (contract.expected_end_date - contract.start_date).days + 1
+                calculated = min(10, max(1, duration // 5))
+                st.caption(f"Calcul: ⌊{duration}/5⌋ = {calculated} jours")
+        
+        with col3:
+            st.markdown("**Validation**")
+            
+            # Validation
+            valid, error_msg = validate_date_coherence(
+                contract.start_date,
+                contract.expected_end_date,
+                contract.actual_end_date
+            )
+            
+            if valid:
+                st.success("✅ Dates cohérentes")
+            else:
+                st.error(f"❌ {error_msg}")
+        
+        st.divider()
+    
+    # Section de génération
+    st.header("📄 3. Générer les fichiers de mise à jour")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("🚀 Générer les fichiers AU", type="primary", use_container_width=True):
+            for idx, contract in enumerate(st.session_state.contracts):
+                try:
+                    # Générer le fichier AU
+                    au_tree = build_au_packet(contract)
+                    xml_content = tree_to_string(au_tree)
+                    filename = generate_output_filename('AU')
+                    
+                    # Bouton de téléchargement
+                    st.download_button(
+                        label=f"📥 Télécharger {filename}",
+                        data=xml_content,
+                        file_name=filename,
+                        mime="application/xml",
+                        key=f"download_{idx}"
+                    )
+                    
+                except Exception as e:
+                    st.error(f"Erreur génération contrat {idx + 1}: {str(e)}")
+    
+    with col2:
+        if st.button("🗑️ Réinitialiser", use_container_width=True):
+            st.session_state.contracts = []
+            st.rerun()
+
+else:
+    # Instructions si aucun fichier chargé
+    st.info("👆 Chargez un fichier XML pour commencer")
+    
+    with st.expander("📖 Guide d'utilisation"):
+        st.markdown("""
+        ### Comment utiliser cette application
+        
+        1. **Chargez votre fichier XML** (format: ASS_*_A_ETT.xml)
+        2. **Cliquez sur "Analyser"** pour extraire les contrats
+        3. **Vérifiez les dates** calculées automatiquement
+        4. **Générez les fichiers AU** avec les dates corrigées
+        
+        ### Règles de calcul appliquées
+        
+        - **Jours de flexibilité** = ⌊(durée en jours / 5)⌋
+        - **Minimum**: 1 jour
+        - **Maximum**: 10 jours
+        - **FlexibilityMinDate** = ExpectedEndDate - jours de flexibilité
+        - **FlexibilityMaxDate** = ExpectedEndDate + jours de flexibilité
+        
+        ### Format des dates
+        
+        Toutes les dates sont au format **YYYY-MM-DD** (ISO 8601)
+        """)
+
+# Footer
+st.markdown("---")
+st.caption("Pilott Date Editor v1.0 - Calcul automatique des dates de flexibilité")
