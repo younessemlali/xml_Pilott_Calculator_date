@@ -79,8 +79,10 @@ def parse_date(date_str: str) -> date:
     """Parse une date au format YYYY-MM-DD."""
     return datetime.strptime(date_str, DATE_FORMAT).date()
 
-def format_date(date_obj: date) -> str:
+def format_date(date_obj: Optional[date]) -> str:
     """Formate une date au format YYYY-MM-DD."""
+    if date_obj is None:
+        return ""
     return date_obj.strftime(DATE_FORMAT)
 
 def format_datetime_utc(dt: datetime) -> str:
@@ -206,10 +208,12 @@ def build_au_packet(contract: ContractData) -> ET.ElementTree:
         actual_end_elem.text = format_date(contract.actual_end_date)
     
     flex_min_elem = ET.SubElement(date_range, '{' + NAMESPACES['hr'] + '}FlexibilityMinDate')
-    flex_min_elem.text = format_date(contract.flex_min_date)
+    if contract.flex_min_date:
+        flex_min_elem.text = format_date(contract.flex_min_date)
     
     flex_max_elem = ET.SubElement(date_range, '{' + NAMESPACES['hr'] + '}FlexibilityMaxDate')
-    flex_max_elem.text = format_date(contract.flex_max_date)
+    if contract.flex_max_date:
+        flex_max_elem.text = format_date(contract.flex_max_date)
     
     return ET.ElementTree(root)
 
@@ -431,8 +435,12 @@ def main():
                             contract.flex_min_date = flex_min
                             contract.flex_max_date = flex_max
                         
-                        st.info(f"**Flexibilité Min:** {format_date(contract.flex_min_date)}")
-                        st.info(f"**Flexibilité Max:** {format_date(contract.flex_max_date)}")
+                        # Assurer que les dates de flexibilité existent
+                        if contract.flex_min_date and contract.flex_max_date:
+                            st.info(f"**Flexibilité Min:** {format_date(contract.flex_min_date)}")
+                            st.info(f"**Flexibilité Max:** {format_date(contract.flex_max_date)}")
+                        else:
+                            st.warning("Dates de flexibilité non calculées")
                         
                         duration = (contract.expected_end_date - contract.start_date).days + 1
                         flex_days = min(10, max(1, duration // 5))
